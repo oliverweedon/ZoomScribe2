@@ -1,0 +1,1 @@
+../HaSofer/dictionary_server.py

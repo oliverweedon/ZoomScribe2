@@ -1,0 +1,25 @@
+# Credentials — never commit
+credentials.json
+*.pickle
+*.pem
+*.p12
+
+# User config lives in ~/.zoomscribe/ — not in this repo
+# (API key, template doc ID, cost tracking)
+
+# Corrections dictionary — personal names, keep private
+dictionaries/
+
+# Built app bundle
+ZoomScribe2.app/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# macOS
+.DS_Store
+.AppleDouble
