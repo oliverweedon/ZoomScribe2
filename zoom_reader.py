@@ -220,16 +220,17 @@ class ZoomTranscriptReader:
             return []
         return self._parse_table(table)
 
-    def poll_forever(self):
+    def poll_forever(self, skip_before: str = ""):
         """
         Yield (speaker, timestamp, text) for every new or updated utterance,
         or yield None as a heartbeat when nothing changed (lets callers check
         timeouts without a separate thread).
 
-        On first connect (first non-empty snapshot), ALL existing entries are
-        silently loaded as the historical baseline — nothing is yielded for them.
-        Only turns that appear AFTER that baseline are yielded. This prevents
-        flooding the caller with a full meeting backlog on startup.
+        On first connect (first non-empty snapshot), entries OLDER than
+        skip_before are silently loaded as the historical baseline. Entries
+        AT or AFTER skip_before are NOT baselined — they will be yielded
+        normally on the next poll, so speech that occurred between session
+        start and the first snapshot is never lost.
 
         The last entry in the table is often still 'live' — Zoom keeps appending
         to it as the speaker continues. We re-yield it each time its text grows.
@@ -243,14 +244,20 @@ class ZoomTranscriptReader:
 
                 if not connected:
                     if entries:
-                        # First non-empty snapshot — treat everything as historical baseline
+                        baselined = 0
                         for sp, ts, text in entries:
-                            key = (sp, ts)
-                            self._emitted[key] = text
-                            self._order.append(key)
-                        print(f"  Transcript connected — {len(entries)} historical turns skipped.")
+                            # Only baseline entries that are definitely before
+                            # this session started. Entries at or after
+                            # skip_before are left out of _emitted so they
+                            # get yielded on the next normal poll pass.
+                            if not skip_before or not ts or ts < skip_before:
+                                key = (sp, ts)
+                                self._emitted[key] = text
+                                self._order.append(key)
+                                baselined += 1
+                        print(f"  Transcript connected — {baselined} historical turns skipped.")
                         connected = True
-                    # Either way, yield a heartbeat and move on — nothing to emit yet
+                    # Either way, yield a heartbeat and move on
                     yield None
                     time.sleep(self.poll_interval)
                     continue

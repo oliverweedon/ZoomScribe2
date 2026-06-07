@@ -145,7 +145,7 @@ class ZoomScribeApp(rumps.App):
     def _tick(self, _):
         running = bool(self._session_thread and self._session_thread.is_alive())
         if running and self._start_time:
-            self.title = "⏺"
+            self.title = f"⏺ {self._para_count}p" if self._para_count else "⏺"
         elif not running and self._start_time is not None:
             # Session just ended — reset UI
             self.title = None
@@ -268,7 +268,7 @@ class ZoomScribeApp(rumps.App):
 
         # ── Main polling loop ─────────────────────────────────────────────────
         try:
-            for item in reader.poll_forever():
+            for item in reader.poll_forever(skip_before=session_start_ts):
                 if stop.is_set():
                     break
 
