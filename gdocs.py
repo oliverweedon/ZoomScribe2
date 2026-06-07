@@ -289,7 +289,7 @@ class DocsWriter:
 
     def _start_pulse(self):
         def _loop():
-            while not self._pulse_stop.wait(1.0):
+            while not self._pulse_stop.wait(10.0):
                 self._update_status(recording=True)
         threading.Thread(target=_loop, daemon=True, name="ZS2-pulse").start()
 
