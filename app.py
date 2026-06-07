@@ -203,7 +203,8 @@ class ZoomScribeApp(rumps.App):
         last_update_t:    float      = time.monotonic()
         first_pending_t:  float      = time.monotonic()
         written_text:     dict[tuple, str] = {}
-        last_doc_speaker: str        = ""
+        finalized_keys:   set[tuple]      = set()
+        last_doc_speaker: str             = ""
 
         def _process(raw_text: str) -> str:
             corrected = corr.apply(raw_text)
@@ -212,7 +213,7 @@ class ZoomScribeApp(rumps.App):
 
         def flush(full_reset: bool = True):
             nonlocal pending_speaker, pending_ts, pending_text
-            nonlocal last_update_t, first_pending_t, last_doc_speaker
+            nonlocal last_update_t, first_pending_t, last_doc_speaker, finalized_keys
 
             if not pending_speaker or not pending_text:
                 return
@@ -222,7 +223,9 @@ class ZoomScribeApp(rumps.App):
             if pending_text.startswith(already):
                 delta = pending_text[len(already):].strip()
             else:
-                delta = pending_text
+                # Zoom revised earlier words. Never re-write what's already in
+                # the doc — take only characters past the previously-written length.
+                delta = pending_text[len(already):].strip()
 
             if not delta:
                 if full_reset:
@@ -249,6 +252,7 @@ class ZoomScribeApp(rumps.App):
             self._para_count += 1
 
             if full_reset:
+                finalized_keys.add(key)
                 pending_speaker = None
                 pending_ts      = ""
                 pending_text    = ""
@@ -276,6 +280,10 @@ class ZoomScribeApp(rumps.App):
                     continue
 
                 speaker, ts, text = item
+
+                # Skip turns already written — ignore Zoom's post-hoc revisions
+                if (speaker, ts) in finalized_keys:
+                    continue
 
                 if written_text.get((speaker, ts)) == text:
                     continue
