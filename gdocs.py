@@ -431,6 +431,20 @@ class DocsWriter:
                 if nr and nr[0].get("ranges"):
                     self._insert_idx = nr[0]["ranges"][0]["startIndex"]
                     self._cursor_range_id = nr[0]["namedRangeId"]
+                    return
+            # Named range missing — a co-editor may have deleted the anchor
+            # character. Recover by scanning the doc for the correct position.
+            self._recover_cursor_from_doc()
+        except Exception:
+            pass  # network error — keep existing _insert_idx, retry next write
+
+    def _recover_cursor_from_doc(self) -> None:
+        """Re-derive insert position by scanning doc content, then re-plant."""
+        try:
+            doc = self._call_docs(lambda: self._get_doc(includeTabsContent=True))
+            self._insert_idx = self._tab_end(doc, self._tab_id)
+            print("  ↻  Cursor range missing — recovered from doc scan.", flush=True)
+            self._plant_cursor()
         except Exception:
             pass
 
@@ -493,6 +507,7 @@ class DocsWriter:
 
         self._call_docs(lambda: self._batchUpdate(ops))
         self._insert_idx += char_count
+        self._plant_cursor()  # keep named range fresh after every write
 
     def append(self, text: str, bold_prefix: str = ""):
         """Write one paragraph (Normal Text, Arial 14pt).
@@ -532,21 +547,16 @@ class DocsWriter:
         except Exception as exc:
             exc_detail = getattr(getattr(exc, 'response', None), 'text', str(exc))
             if "must be less than the end index" in exc_detail:
-                print("  ↻  Index drift — resyncing…")
+                print("  ↻  Index drift — resyncing from cursor…", flush=True)
                 try:
-                    doc = self._call_docs(lambda: self._get_doc(includeTabsContent=True))
-                    self._insert_idx = self._tab_end(doc, self._tab_id)
-                    start       = self._insert_idx
-                    location    = {"index": start}
-                    if self._tab_id:
-                        location["tabId"] = self._tab_id
-                    style_range = {"startIndex": start, "endIndex": start + text_count}
-                    if self._tab_id:
-                        style_range["tabId"] = self._tab_id
-                    self._write(location, style_range, line, char_count)
+                    # Re-derive position from doc content and re-plant cursor,
+                    # then retry the write at the fresh position.
+                    self._recover_cursor_from_doc()
+                    self._write(location, style_range, line, char_count,
+                                bold_prefix_len=prefix_len)
                     self._para_count += 1
                     print(f"    ✓ Written to doc after resync (para {self._para_count})", flush=True)
-                    print("  ✅  Resynced.")
+                    print("  ✅  Resynced.", flush=True)
                 except Exception:
                     print("  Write failed after resync:")
                     traceback.print_exc()
