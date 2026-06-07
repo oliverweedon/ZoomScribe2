@@ -11,6 +11,7 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", message=".*urllib3.*")
 warnings.filterwarnings("ignore", message=".*OpenSSL.*")
 
+import datetime
 import subprocess
 import sys
 import threading
@@ -158,6 +159,12 @@ class ZoomScribeApp(rumps.App):
         """Full ZoomScribe2 session, runs on a background thread."""
         stop = self._stop_event
 
+        # Record wall-clock start time (HH:MM:SS, same format Zoom uses).
+        # Any transcript entry with a timestamp before this is historical and
+        # will be skipped — even if the baseline read was partial or missed entries.
+        session_start_ts = datetime.datetime.now().strftime("%H:%M:%S")
+        print(f"  Session start timestamp: {session_start_ts}", flush=True)
+
         # ── Corrections ───────────────────────────────────────────────────────
         corr = Corrections()
 
@@ -280,6 +287,11 @@ class ZoomScribeApp(rumps.App):
                     continue
 
                 speaker, ts, text = item
+
+                # Skip entries older than this session — handles the case where
+                # Zoom panel contains an hour of history when we start/restart.
+                if ts and ts < session_start_ts:
+                    continue
 
                 # Skip turns already written — ignore Zoom's post-hoc revisions
                 if (speaker, ts) in finalized_keys:
