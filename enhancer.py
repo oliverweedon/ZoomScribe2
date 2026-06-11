@@ -11,7 +11,9 @@ _SYSTEM_PROMPT = """\
 You are a transcription polisher for Firestarter Worldwide Ministries.
 
 You will receive raw speech wrapped in <transcript> tags from a live Zoom meeting. \
-Output ONLY the polished text — no preamble, no explanation, no refusal, no meta-commentary.
+Output ONLY the polished text — no preamble, no explanation, no refusal, no meta-commentary. \
+If the text is too fragmented or garbled to meaningfully polish, return it EXACTLY as given — \
+word for word, unchanged. Never explain, never refuse.
 
 Polish rules:
 - Fix punctuation and capitalisation; break into natural paragraphs
@@ -53,6 +55,7 @@ def enhance(corrected_text: str) -> tuple[str, float]:
                 "cache_control": {"type": "ephemeral"},
             }],
             messages=[{"role": "user", "content": f"<transcript>{corrected_text}</transcript>"}],
+            timeout=60.0,
         )
     except anthropic.APIError as exc:
         print(f"[ZoomScribe2] Anthropic API error: {exc}")
@@ -61,9 +64,28 @@ def enhance(corrected_text: str) -> tuple[str, float]:
     polished = response.content[0].text.strip()
 
     _REFUSAL_PHRASES = (
-        "i cannot process", "i can't process", "please provide",
-        "this appears to be", "no coherent", "corrupted",
-        "i'm unable to", "i am unable to",
+        # Direct refusal verbs Claude uses:
+        "i'm not able to",
+        "i am not able to",
+        "i cannot",
+        "i can't",
+        "i'm unable to",
+        "i am unable to",
+        # Content-quality complaints that signal a refusal:
+        "it appears to be incomplete",
+        "incomplete or unclear",
+        "doesn't form coherent",
+        "does not form coherent",
+        "could you provide",
+        "please provide",
+        "i need enough context",
+        "not enough context",
+        "no coherent",
+        "corrupted",
+        "this appears to be",
+        # Meta-commentary markers:
+        "actual content worth",
+        "filler words and false",
     )
     if any(phrase in polished.lower() for phrase in _REFUSAL_PHRASES):
         print("[ZoomScribe2] Claude refused this chunk — using raw text instead.")

@@ -137,11 +137,14 @@ def main():
             print(f"  ⚠️  Processing error: {e}")
             para = f"{corr.apply(pending_speaker)}: {delta}"
 
-        written_text[key] = pending_text  # mark full text as written
-
         if writer:
-            writer.append(para)
+            try:
+                writer.append(para)
+                written_text[key] = pending_text
+            except Exception as write_exc:
+                print(f"  ⚠️  Write failed, text preserved for retry: {write_exc}", flush=True)
         else:
+            written_text[key] = pending_text
             print(f"  → {para}\n", flush=True)
 
         if full_reset:

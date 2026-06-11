@@ -18,6 +18,7 @@ import threading
 import time
 import traceback
 from datetime import datetime
+from pathlib import Path
 
 from google.auth.transport.requests import AuthorizedSession, Request
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -44,6 +45,18 @@ def _notify_error(title: str, message: str):
         ["osascript", "-e", f'display notification "{message}" with title "{title}" sound name "Basso"'],
         capture_output=True,
     )
+
+
+_FALLBACK_DIR = Path.home() / ".zoomscribe"
+
+
+def _write_fallback(text: str) -> Path:
+    """Append text to today's fallback file. Returns the file path."""
+    _FALLBACK_DIR.mkdir(parents=True, exist_ok=True)
+    path = _FALLBACK_DIR / f"fallback_{datetime.now().strftime('%Y%m%d')}.txt"
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(f"[{datetime.now().strftime('%H:%M:%S')}] {text}\n")
+    return path
 
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
@@ -403,21 +416,33 @@ class DocsWriter:
         return doc["body"]["content"][-1]["endIndex"] - 1
 
     def _plant_cursor(self) -> None:
-        reqs = []
-        if self._cursor_range_id:
-            reqs.append({"deleteNamedRange": {"namedRangeId": self._cursor_range_id}})
         r = {"startIndex": self._insert_idx, "endIndex": self._insert_idx + 1}
         if self._tab_id:
             r["tabId"] = self._tab_id
-        reqs.append({"createNamedRange": {"name": self._CURSOR_NAME, "range": r}})
-        try:
+        create_req = {"createNamedRange": {"name": self._CURSOR_NAME, "range": r}}
+
+        def _apply(reqs):
             resp = self._call_docs(lambda: self._batchUpdate(reqs))
             replies = (resp or {}).get("replies", [])
             for reply in replies:
                 if "createNamedRange" in reply:
                     self._cursor_range_id = reply["createNamedRange"]["namedRangeId"]
+
+        reqs = []
+        if self._cursor_range_id:
+            reqs.append({"deleteNamedRange": {"namedRangeId": self._cursor_range_id}})
+        reqs.append(create_req)
+        try:
+            _apply(reqs)
         except Exception:
-            pass
+            if self._cursor_range_id:
+                # The delete likely failed because the range was already gone.
+                # Clear the stale ID and retry with just the create.
+                self._cursor_range_id = None
+                try:
+                    _apply([create_req])
+                except Exception:
+                    pass
 
     def _read_cursor(self) -> None:
         try:
@@ -433,7 +458,10 @@ class DocsWriter:
                     self._cursor_range_id = nr[0]["namedRangeId"]
                     return
             # Named range missing — a co-editor may have deleted the anchor
-            # character. Recover by scanning the doc for the correct position.
+            # character. Clear the stale range ID so _plant_cursor won't try
+            # to delete it (which would cause the whole batch to fail), then
+            # recover by scanning the doc for the correct position.
+            self._cursor_range_id = None
             self._recover_cursor_from_doc()
         except Exception:
             pass  # network error — keep existing _insert_idx, retry next write
@@ -443,7 +471,7 @@ class DocsWriter:
         try:
             doc = self._call_docs(lambda: self._get_doc(includeTabsContent=True))
             self._insert_idx = self._tab_end(doc, self._tab_id)
-            print("  ↻  Cursor range missing — recovered from doc scan.", flush=True)
+            print(f"  ↻  Cursor range missing — recovered from doc scan (idx={self._insert_idx}).", flush=True)
             self._plant_cursor()
         except Exception:
             pass
@@ -560,8 +588,12 @@ class DocsWriter:
                 except Exception:
                     print("  Write failed after resync:")
                     traceback.print_exc()
-                    _notify_error("ZoomScribe 2 — Write Failed", "Could not write to Google Doc.")
+                    fallback_path = _write_fallback(full_text)
+                    _notify_error("ZoomScribe 2 — Write Failed", f"Saved to {fallback_path.name}")
+                    raise
             else:
                 print("  Write to Google Doc failed:")
                 traceback.print_exc()
-                _notify_error("ZoomScribe 2 — Write Failed", "Could not write to Google Doc.")
+                fallback_path = _write_fallback(full_text)
+                _notify_error("ZoomScribe 2 — Write Failed", f"Saved to {fallback_path.name}")
+                raise

@@ -16,6 +16,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import webbrowser
 from pathlib import Path
 
@@ -159,6 +160,33 @@ class ZoomScribeApp(rumps.App):
         """Full ZoomScribe2 session, runs on a background thread."""
         stop = self._stop_event
 
+        # ── Session log (tee stdout → file so the user can tail -f it) ──────────
+        _log_dir = Path.home() / ".zoomscribe"
+        _log_dir.mkdir(parents=True, exist_ok=True)
+        _log_path = _log_dir / f"session_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        _log_file = open(_log_path, "w", encoding="utf-8", buffering=1)
+
+        class _Tee:
+            def __init__(self, orig, log):
+                self._orig, self._log = orig, log
+            def write(self, data):
+                self._orig.write(data)
+                self._log.write(data)
+            def flush(self):
+                self._orig.flush()
+                self._log.flush()
+            def fileno(self):
+                return self._orig.fileno()
+
+        _orig_stdout = sys.stdout
+        sys.stdout = _Tee(_orig_stdout, _log_file)
+
+        # Open a Terminal window that tails the log so the user can see live output.
+        _tail_sh = _log_dir / "tail_log.sh"
+        _tail_sh.write_text(f"#!/bin/bash\necho 'ZoomScribe2 — {_log_path.name}'\ntail -f '{_log_path}'\n")
+        _tail_sh.chmod(0o755)
+        subprocess.Popen(["open", "-a", "Terminal", str(_tail_sh)])
+
         # Record wall-clock start time (HH:MM:SS, same format Zoom uses).
         # Any transcript entry with a timestamp before this is historical and
         # will be skipped — even if the baseline read was partial or missed entries.
@@ -209,30 +237,66 @@ class ZoomScribeApp(rumps.App):
         pending_text:     str        = ""
         last_update_t:    float      = time.monotonic()
         first_pending_t:  float      = time.monotonic()
-        written_text:     dict[tuple, str] = {}
-        finalized_keys:   set[tuple]      = set()
-        last_doc_speaker: str             = ""
+        submitted_text:   dict[tuple, str] = {}   # optimistic baseline for delta calcs
+        finalized_keys:   set[tuple]       = set()
 
         def _process(raw_text: str) -> str:
             corrected = corr.apply(raw_text)
             polished, _ = enhancer.enhance(corrected)
             return polished
 
+        # ── Write queue — polling never blocks on API latency ─────────────────
+        import queue as _queue_mod
+        _write_q: _queue_mod.Queue = _queue_mod.Queue()
+
+        def _writer_worker():
+            """Drains write queue on its own thread. Claude + GDocs happen here."""
+            _last_speaker = ""
+            while True:
+                job = _write_q.get()
+                if job is None:          # sentinel — time to exit
+                    _write_q.task_done()
+                    break
+                delta, speaker_label = job
+                try:
+                    try:
+                        polished = _process(delta)
+                    except Exception:
+                        polished = corr.apply(delta)
+                    if writer:
+                        try:
+                            if speaker_label != _last_speaker:
+                                writer.append(polished, bold_prefix=speaker_label)
+                                _last_speaker = speaker_label
+                            else:
+                                writer.append(polished)
+                        except Exception as _we:
+                            print(f"  [write failed] {_we}", flush=True)
+                except Exception as _workerexc:
+                    print(f"  [worker error] {_workerexc}", flush=True)
+                finally:
+                    _write_q.task_done()
+
+        _write_thread = threading.Thread(
+            target=_writer_worker, daemon=True, name="zs2-writer",
+        )
+        _write_thread.start()
+
         def flush(full_reset: bool = True):
             nonlocal pending_speaker, pending_ts, pending_text
-            nonlocal last_update_t, first_pending_t, last_doc_speaker, finalized_keys
+            nonlocal last_update_t, first_pending_t, finalized_keys
 
             if not pending_speaker or not pending_text:
                 return
 
-            key     = (pending_speaker, pending_ts)
-            already = written_text.get(key, "")
+            key    = (pending_speaker, pending_ts)
+            already = submitted_text.get(key, "")
             if pending_text.startswith(already):
                 delta = pending_text[len(already):].strip()
             else:
-                # Zoom revised earlier words. Never re-write what's already in
-                # the doc — take only characters past the previously-written length.
-                delta = pending_text[len(already):].strip()
+                # Zoom revised earlier words — write full current text, reset baseline
+                delta = pending_text.strip()
+                submitted_text[key] = ""
 
             if not delta:
                 if full_reset:
@@ -242,21 +306,11 @@ class ZoomScribeApp(rumps.App):
                     first_pending_t = time.monotonic()
                 return
 
-            try:
-                polished = _process(delta)
-            except Exception:
-                polished = corr.apply(delta)
-
             speaker_label = corr.apply(pending_speaker)
-            written_text[key] = pending_text
-
-            if writer:
-                if speaker_label != last_doc_speaker:
-                    writer.append(polished, bold_prefix=speaker_label)
-                    last_doc_speaker = speaker_label
-                else:
-                    writer.append(polished)
+            submitted_text[key] = pending_text  # optimistic: treat as submitted
+            _write_q.put((delta, speaker_label))
             self._para_count += 1
+            print(f"  [queued] {speaker_label}: {delta[:60]}", flush=True)
 
             if full_reset:
                 finalized_keys.add(key)
@@ -279,28 +333,44 @@ class ZoomScribeApp(rumps.App):
                     silence = now - last_update_t
                     age     = now - first_pending_t
                     if silence > _SILENCE_TIMEOUT:
+                        print(f"  [silence timeout {silence:.1f}s → flush] {pending_speaker}", flush=True)
                         flush(full_reset=True)
                     elif age > _FLUSH_INTERVAL:
+                        print(f"  [age timeout {age:.1f}s → partial flush] {pending_speaker}", flush=True)
                         flush(full_reset=False)
 
                 if item is None:
                     continue
 
+                if item[0] == "__disconnected__":
+                    rumps.notification(
+                        "ZoomScribe 2",
+                        "⚠️ Transcript closed",
+                        "Zoom closed the Transcript panel — trying to reopen…",
+                        sound=True,
+                    )
+                    continue
+
                 speaker, ts, text = item
 
-                # Skip entries older than this session — handles the case where
-                # Zoom panel contains an hour of history when we start/restart.
-                if ts and ts < session_start_ts:
-                    continue
-
-                # Skip turns already written — ignore Zoom's post-hoc revisions
+                # Skip turns already written — ignore Zoom's post-hoc revisions.
+                # But if the entry has grown beyond what we submitted, un-finalize
+                # it so the new tail gets written (same-timestamp continuation speech).
                 if (speaker, ts) in finalized_keys:
+                    already = submitted_text.get((speaker, ts), "")
+                    if len(text) <= len(already):
+                        continue  # same length or shorter — correction only, skip
+                    # Entry genuinely grew — remove from finalized so it flows through
+                    finalized_keys.discard((speaker, ts))
+                    print(f"  [un-finalized] {ts} {speaker}: +{len(text)-len(already)} chars", flush=True)
+
+                if submitted_text.get((speaker, ts)) == text:
                     continue
 
-                if written_text.get((speaker, ts)) == text:
-                    continue
+                print(f"  [recv] {ts} {speaker}: {text[:60]}", flush=True)
 
                 if pending_speaker is None:
+                    print(f"  [start pending] {speaker} @ {ts}", flush=True)
                     pending_speaker = speaker
                     pending_ts      = ts
                     pending_text    = text
@@ -312,6 +382,7 @@ class ZoomScribeApp(rumps.App):
                     last_update_t = now
 
                 else:
+                    print(f"  [speaker change → flush] {pending_speaker} → {speaker}", flush=True)
                     flush(full_reset=True)
                     pending_speaker = speaker
                     pending_ts      = ts
@@ -319,18 +390,43 @@ class ZoomScribeApp(rumps.App):
                     last_update_t   = now
                     first_pending_t = now
 
-        except Exception:
-            pass
+        except Exception as _loop_exc:
+            _crash_log = Path.home() / ".zoomscribe" / "crash.log"
+            try:
+                _crash_log.parent.mkdir(parents=True, exist_ok=True)
+                with open(_crash_log, "a", encoding="utf-8") as _f:
+                    _f.write(
+                        f"\n--- {datetime.datetime.now().isoformat()} ---\n"
+                        f"{traceback.format_exc()}\n"
+                    )
+            except Exception:
+                pass
+            try:
+                rumps.notification(
+                    "ZoomScribe 2", "Session error — check crash.log",
+                    str(_loop_exc)[:80], sound=True,
+                )
+            except Exception:
+                pass
 
         # ── Cleanup ───────────────────────────────────────────────────────────
         flush(full_reset=True)
+
+        # Drain the write queue fully before closing the doc
+        _write_q.put(None)
+        _write_q.join()
 
         if writer:
             writer.set_stopped()
             writer.close()
 
         summary = config.session_summary()
+        print(f"\n  Session ended. {summary}", flush=True)
         rumps.notification("ZoomScribe 2", "Session ended", summary, sound=False)
+
+        # Restore stdout and close log
+        sys.stdout = _orig_stdout
+        _log_file.close()
 
 
 if __name__ == "__main__":
