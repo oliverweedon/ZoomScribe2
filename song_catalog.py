@@ -57,23 +57,42 @@ class SongCatalog:
 
         drive = build("drive", "v3", credentials=creds)
 
-        # Fetch full file list (all pages)
-        all_files = []
-        page_token = None
-        while True:
-            resp = drive.files().list(
-                q=f"'{_CATALOG_FOLDER}' in parents and trashed=false"
-                  f" and mimeType='application/vnd.google-apps.presentation'",
-                fields="nextPageToken,files(id,name,modifiedTime)",
-                pageSize=200,
-                pageToken=page_token,
-            ).execute()
-            all_files += resp.get("files", [])
-            page_token = resp.get("nextPageToken")
-            if not page_token:
-                break
+        # Fetch presentations from a folder (one page at a time)
+        def _fetch_presentations(folder_id: str) -> list[dict]:
+            results, page_token = [], None
+            while True:
+                resp = drive.files().list(
+                    q=f"'{folder_id}' in parents and trashed=false"
+                      f" and mimeType='application/vnd.google-apps.presentation'",
+                    fields="nextPageToken,files(id,name,modifiedTime)",
+                    pageSize=200,
+                    pageToken=page_token,
+                ).execute()
+                results += resp.get("files", [])
+                page_token = resp.get("nextPageToken")
+                if not page_token:
+                    break
+            return results
 
-        print(f"  [songs] catalog: {len(all_files)} songs found in Drive", flush=True)
+        # Fetch subfolders of a folder
+        def _fetch_subfolders(folder_id: str) -> list[dict]:
+            resp = drive.files().list(
+                q=f"'{folder_id}' in parents and trashed=false"
+                  f" and mimeType='application/vnd.google-apps.folder'",
+                fields="files(id,name)",
+                pageSize=200,
+            ).execute()
+            return resp.get("files", [])
+
+        # Recursively collect all presentations (root + one level of subfolders)
+        all_files = _fetch_presentations(_CATALOG_FOLDER)
+        subfolders = _fetch_subfolders(_CATALOG_FOLDER)
+        for sf in subfolders:
+            sub_files = _fetch_presentations(sf["id"])
+            print(f"  [songs] subfolder '{sf['name']}': {len(sub_files)} songs", flush=True)
+            all_files += sub_files
+
+        print(f"  [songs] catalog: {len(all_files)} songs total ({len(subfolders)} subfolders scanned)", flush=True)
 
         # Build title index
         with self._lock:
