@@ -120,14 +120,6 @@ class ZoomTranscriptReader:
                 wins  = ref.windows() or []
                 titles = [getattr(w, "AXTitle", "?") for w in wins]
                 print(f"  [diag] PID {pid}: {len(wins)} window(s) → {titles}", flush=True)
-                # Also probe AXAllWindows (catches auxiliary/transient panels)
-                try:
-                    all_wins = getattr(ref, 'AXAllWindows', None) or []
-                    if all_wins and len(all_wins) != len(wins):
-                        all_titles = [getattr(w, "AXTitle", "?") for w in all_wins]
-                        print(f"  [diag] PID {pid}: AXAllWindows {len(all_wins)} → {all_titles}", flush=True)
-                except Exception:
-                    pass
             except Exception as e:
                 print(f"  [diag] ref error: {e}", flush=True)
         # Quartz view — always runs; kCGWindowName is None without Screen Recording
@@ -161,25 +153,13 @@ class ZoomTranscriptReader:
         Tries every running Zoom-related process (not just the main bundle),
         because the Transcript panel may live in a helper process mid-meeting.
 
-        Per process, three window strategies:
-        1. AXWindows (ref.windows()) — standard windows list.
-        2. AXAllWindows — includes auxiliary/transient panels that AXWindows omits.
-           Zoom's Transcript is a floating panel excluded from AXWindows but present
-           in AXAllWindows on macOS 10.13+.
-        3. Title match then content (AXTable) match on any windows found.
+        Per process, two strategies:
+        1. Title match  — fast; catches 'Transcript', 'Live Transcript', etc.
+        2. Content match — finds any window containing the transcript AXTable.
         """
         for app_ref in self._get_zoom_app_refs():
             try:
                 windows = app_ref.windows() or []
-
-                # AXAllWindows catches floating panels excluded from AXWindows
-                if not windows:
-                    try:
-                        all_wins = getattr(app_ref, 'AXAllWindows', None) or []
-                        if all_wins:
-                            windows = list(all_wins)
-                    except Exception:
-                        pass
 
                 # Strategy 1: title contains "transcript"
                 for w in windows:
@@ -331,7 +311,6 @@ class ZoomTranscriptReader:
             from ApplicationServices import (
                 AXUIElementCreateSystemWide,
                 AXUIElementCopyElementAtPosition,
-                AXUIElementGetPid,
                 kAXErrorSuccess,
             )
             options = (Quartz.kCGWindowListOptionOnScreenOnly |
@@ -353,44 +332,17 @@ class ZoomTranscriptReader:
                 if not bounds or bounds.get('Width', 0) < 10 or bounds.get('Height', 0) < 10:
                     continue
 
-                window_pid = info.get('kCGWindowOwnerPID')
-
-                # Probe multiple points — center, all four near-corners.
-                # When another app (e.g. Chrome) covers the Zoom window, the centre
-                # probe returns the wrong app's element.  PID verification catches
-                # this and tries additional points.
+                # Probe window centre first, top-left area as fallback
                 cx = float(bounds['X'] + bounds['Width'] / 2)
                 cy = float(bounds['Y'] + bounds['Height'] / 2)
-                bx, by = float(bounds['X']), float(bounds['Y'])
-                bw, bh = float(bounds['Width']), float(bounds['Height'])
-                probe_points = [
-                    (cx, cy),
-                    (bx + 20,      by + 60),
-                    (bx + bw - 20, by + 60),
-                    (bx + 20,      by + bh - 60),
-                    (bx + bw - 20, by + bh - 60),
-                ]
                 raw_elem = None
-                for px, py in probe_points:
+                for px, py in [(cx, cy),
+                               (float(bounds['X'] + 20), float(bounds['Y'] + 60))]:
                     err, elem = AXUIElementCopyElementAtPosition(systemWide, px, py, None)
                     if err == kAXErrorSuccess and elem is not None:
-                        # Verify the element belongs to the Zoom window we probed,
-                        # not to another app that happens to be in front at those coords.
-                        try:
-                            pid_err, elem_pid = AXUIElementGetPid(elem, None)
-                            if pid_err == kAXErrorSuccess and elem_pid != window_pid:
-                                print(f"  [quartz] probe ({px:.0f},{py:.0f}) → pid {elem_pid}"
-                                      f" (expected {window_pid}) — window covered, trying next point",
-                                      flush=True)
-                                continue
-                        except Exception:
-                            pass  # can't verify pid; try the element anyway
                         raw_elem = elem
                         break
                 if raw_elem is None:
-                    print(f"  [quartz] all probe points for pid {window_pid} "
-                          f"({bw:.0f}×{bh:.0f} @ {bx:.0f},{by:.0f}) returned wrong process"
-                          f" — window is fully covered", flush=True)
                     continue
 
                 # Walk up the AX tree to the window element
@@ -401,10 +353,6 @@ class ZoomTranscriptReader:
                         if role == 'AXWindow':
                             if self._find_transcript_table(ax) is not None:
                                 return ax
-                            # Reached a window but no transcript table inside — log it
-                            win_title = getattr(ax, 'AXTitle', '?') or '?'
-                            print(f"  [quartz] found AXWindow {win_title!r} for pid {window_pid}"
-                                  f" but no transcript table — skipping", flush=True)
                             break  # it's a window but not the transcript — move on
                         parent = getattr(ax, 'AXParent', None)
                         if parent is None:

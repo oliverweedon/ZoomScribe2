@@ -31,8 +31,6 @@ import config
 from corrections import Corrections
 import enhancer
 import gdocs
-from song_catalog import SongCatalog
-from song_detector import SongDetector
 from zoom_reader import ZoomTranscriptReader
 
 _SILENCE_TIMEOUT = 8
@@ -233,16 +231,6 @@ class ZoomScribeApp(rumps.App):
                 sound=True,
             )
 
-        # ── Song catalog + detector ───────────────────────────────────────────
-        try:
-            _song_catalog = SongCatalog()
-            _song_catalog.load(gdocs.get_creds())
-            _song_detector = SongDetector(_song_catalog)
-            print("  [songs] detector ready", flush=True)
-        except Exception as _se:
-            print(f"  [songs] catalog load failed (detection disabled): {_se}", flush=True)
-            _song_detector = None
-
         # ── Turn-buffer state ─────────────────────────────────────────────────
         pending_speaker:  str | None = None
         pending_ts:       str        = ""
@@ -364,12 +352,6 @@ class ZoomScribeApp(rumps.App):
                     continue
 
                 speaker, ts, text = item
-
-                # ── Song detection ────────────────────────────────────────────
-                if _song_detector is not None:
-                    _song_title = _song_detector.feed(speaker, ts, text)
-                    if _song_title and writer:
-                        _write_q.put((f"🎵 Song found: {_song_title}", ""))
 
                 # Skip turns already written — ignore Zoom's post-hoc revisions.
                 # But if the entry has grown beyond what we submitted, un-finalize
