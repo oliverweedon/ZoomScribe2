@@ -366,6 +366,37 @@ class ZoomTranscriptReader:
 
     # ── Public API ────────────────────────────────────────────────────────────
 
+    def _exit_fullscreen_if_needed(self) -> bool:
+        """If the main Zoom meeting window is fullscreen, exit it.
+
+        When Zoom is windowed (not fullscreen) the Transcript panel auto-docks
+        to the right side of the meeting window and appears in AXWindows as a
+        normal titled window — the fast, reliable detection path.
+
+        When Zoom is fullscreen, macOS hides its windows from AXWindows entirely,
+        causing all ref.windows() calls to return [] and making the Transcript
+        unreachable via both AX and the Quartz position probe.
+
+        Returns True if fullscreen was detected and exited.
+        """
+        try:
+            for app_ref in self._get_zoom_app_refs():
+                try:
+                    for w in (app_ref.windows() or []):
+                        try:
+                            if getattr(w, 'AXFullScreen', False):
+                                print("  [reader] Zoom is fullscreen — exiting so Transcript can dock…", flush=True)
+                                w.AXFullScreen = False
+                                time.sleep(1.5)   # let Zoom settle into windowed mode
+                                return True
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return False
+
     def try_open_transcript_panel(self) -> bool:
         """Auto-click Zoom's Live Transcript → View Full Transcript buttons.
 
@@ -379,6 +410,10 @@ class ZoomTranscriptReader:
         """
         if self._get_transcript_window():
             return True   # already open — nothing to do
+
+        # Exit fullscreen if needed — windowed mode lets the Transcript dock
+        # and become reliably accessible via AXWindows.
+        self._exit_fullscreen_if_needed()
 
         STEP1_KW = ["live transcript", "closed caption", "captions", "caption"]
         STEP2_KW = ["full transcript", "view transcript"]
