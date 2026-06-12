@@ -382,7 +382,17 @@ class ZoomTranscriptReader:
         try:
             for app_ref in self._get_zoom_app_refs():
                 try:
-                    for w in (app_ref.windows() or []):
+                    # AXAllWindows includes fullscreen windows that AXWindows hides.
+                    # When Zoom IS fullscreen, windows() returns [] — so we must use
+                    # AXAllWindows to find the window we need to un-fullscreen.
+                    wins = []
+                    try:
+                        wins = list(getattr(app_ref, 'AXAllWindows', None) or [])
+                    except Exception:
+                        pass
+                    if not wins:
+                        wins = app_ref.windows() or []
+                    for w in wins:
                         try:
                             if getattr(w, 'AXFullScreen', False):
                                 print("  [reader] Zoom is fullscreen — exiting so Transcript can dock…", flush=True)
@@ -396,6 +406,44 @@ class ZoomTranscriptReader:
         except Exception:
             pass
         return False
+
+    def _try_open_transcript_applescript(self):
+        """AppleScript fallback to click the Live Transcript button in Zoom.
+
+        Used when atomacos ref.windows() returns [] (Zoom AX state is broken).
+        System Events uses a different access path and may reach Zoom when the
+        standard AX API cannot.
+        """
+        script = r"""
+tell application "System Events"
+    tell process "zoom.us"
+        set found to false
+        repeat with w in windows
+            repeat with b in (buttons of w)
+                set d to (description of b) as text
+                set t to (title of b) as text
+                if d contains "transcript" or t contains "transcript" or d contains "caption" or t contains "caption" then
+                    click b
+                    set found to true
+                    exit repeat
+                end if
+            end repeat
+            if found then exit repeat
+        end repeat
+        return found as text
+    end tell
+end tell
+"""
+        try:
+            import subprocess as _sp
+            result = _sp.run(["osascript", "-e", script],
+                             capture_output=True, text=True, timeout=5)
+            clicked = result.stdout.strip() == "true"
+            print(f"  [reader] AppleScript transcript open: {'clicked ✓' if clicked else 'not found'}", flush=True)
+            if result.stderr.strip():
+                print(f"  [reader] AppleScript error: {result.stderr.strip()}", flush=True)
+        except Exception as _e:
+            print(f"  [reader] AppleScript fallback error: {_e}", flush=True)
 
     def try_open_transcript_panel(self) -> bool:
         """Auto-click Zoom's Live Transcript → View Full Transcript buttons.
@@ -446,7 +494,13 @@ class ZoomTranscriptReader:
 
         # Step 1 — press the Live Transcript / CC button
         if not _find_and_press(STEP1_KW):
-            return False
+            # atomacos AX path failed (windows() returned []).
+            # Try AppleScript System Events as a fallback — it uses a different
+            # access mechanism and can sometimes reach Zoom when the AX API can't.
+            print("  [reader] AX button search failed — trying AppleScript fallback…", flush=True)
+            self._try_open_transcript_applescript()
+            time.sleep(1.5)
+            return bool(self._get_transcript_window())
 
         # The panel may open directly after step 1
         if self._get_transcript_window():
