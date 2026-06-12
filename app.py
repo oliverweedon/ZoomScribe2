@@ -213,7 +213,13 @@ class ZoomScribeApp(rumps.App):
                     )
                     webbrowser.open(self._doc_url)
                 except Exception as e:
-                    rumps.notification("ZoomScribe 2", "GDoc setup failed", str(e), sound=False)
+                    print(f"  [gdoc error] GDoc setup failed: {e}", flush=True)
+                    rumps.notification(
+                        "ZoomScribe 2", "⚠️ Session aborted — Google Doc failed",
+                        f"{e}\n\nFix auth then restart.",
+                        sound=True,
+                    )
+                    return  # abort — no point running without a doc
             else:
                 rumps.notification(
                     "ZoomScribe 2", "No template configured",
